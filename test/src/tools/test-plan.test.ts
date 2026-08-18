@@ -25,6 +25,7 @@ describe("configureTestPlanTools", () => {
     getWorkItemTrackingApi: () => Promise<IWorkItemTrackingApi>;
     getTestApi: () => Promise<ITestApi>;
     serverUrl: string;
+    rest: { get: jest.Mock };
   };
   let mockTestPlanApi: ITestPlanApi;
   let mockTestResultsApi: ITestResultsApi;
@@ -41,6 +42,9 @@ describe("configureTestPlanTools", () => {
       createTestSuite: jest.fn(),
       addTestCasesToSuite: jest.fn(),
       getTestCaseList: jest.fn(),
+      updateTestSuite: jest.fn(),
+      getTestSuiteById: jest.fn(),
+      cloneTestPlan: jest.fn(),
     } as unknown as ITestPlanApi;
     mockTestResultsApi = {
       getTestResultDetailsForBuild: jest.fn(),
@@ -60,6 +64,7 @@ describe("configureTestPlanTools", () => {
       getWorkItemTrackingApi: jest.fn().mockResolvedValue(mockWitApi),
       getTestApi: jest.fn().mockResolvedValue(mockTestApi),
       serverUrl: "https://dev.azure.com/testorg",
+      rest: { get: jest.fn() },
     };
     connectionProvider = jest.fn().mockResolvedValue(mockConnection);
   });
@@ -607,7 +612,7 @@ describe("configureTestPlanTools", () => {
       if (!call) throw new Error("testplan_test_plan_write tool not registered");
       const [, , , handler] = call;
 
-      const result = await handler({ project: "proj1", iteration: "Sprint 1" } as any);
+      const result = await handler({ action: "create" as const, project: "proj1", iteration: "Sprint 1" } as any);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("name is required for create");
     });
@@ -618,7 +623,7 @@ describe("configureTestPlanTools", () => {
       if (!call) throw new Error("testplan_test_plan_write tool not registered");
       const [, , , handler] = call;
 
-      const result = await handler({ project: "proj1", name: "Plan" } as any);
+      const result = await handler({ action: "create" as const, project: "proj1", name: "Plan" } as any);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("iteration is required for create");
     });
@@ -631,9 +636,273 @@ describe("configureTestPlanTools", () => {
 
       (mockTestPlanApi.createTestPlan as jest.Mock).mockRejectedValue("plain string error");
 
-      const result = await handler({ project: "proj1", name: "Plan", iteration: "Sprint 1" } as any);
+      const result = await handler({ action: "create" as const, project: "proj1", name: "Plan", iteration: "Sprint 1" } as any);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Unknown error occurred");
+    });
+
+    it("should return error for unknown action", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "unknown_action" as any, project: "proj1" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Unknown action: unknown_action");
+    });
+  });
+
+  describe("clone_test_plan tool", () => {
+    function mockFetchDescendantSuites(value: any[]) {
+      (global.fetch as jest.Mock) = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: jest.fn().mockResolvedValue({ value }),
+        text: jest.fn().mockResolvedValue(""),
+        headers: { get: () => null },
+      });
+    }
+
+    it("should auto-discover every descendant suite when sourceSuiteIds is omitted, and reference test cases by default", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      // Root suite (no parentSuite) must be excluded; its descendants must all be included.
+      mockFetchDescendantSuites([
+        { id: 100, name: "Root Suite" },
+        { id: 101, name: "Child Suite 1", parentSuite: { id: 100 } },
+        { id: 103, name: "Grandchild Suite", parentSuite: { id: 101 } },
+      ]);
+
+      (mockTestPlanApi.cloneTestPlan as jest.Mock).mockResolvedValue({
+        cloneOperationResponse: { id: 99, state: "queued" },
+        destinationTestPlan: { id: 200, name: "Cloned Plan" },
+      });
+
+      const params = {
+        action: "clone" as const,
+        project: "proj1",
+        sourcePlanId: 100,
+        name: "Cloned Plan",
+        iteration: "Sprint 2",
+        areaPath: "proj1\\Area",
+      };
+      const result = await handler(params);
+
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("proj1/_apis/testplan/Plans/100/Suites?"), expect.objectContaining({ method: "GET" }));
+      expect(mockTestPlanApi.cloneTestPlan).toHaveBeenCalledWith(
+        {
+          sourceTestPlan: { id: 100, suiteIds: [101, 103] },
+          destinationTestPlan: {
+            name: "Cloned Plan",
+            iteration: "Sprint 2",
+            description: undefined,
+            startDate: undefined,
+            endDate: undefined,
+            areaPath: "proj1\\Area",
+            project: "proj1",
+          },
+          cloneOptions: { copyAllSuites: false, copyAncestorHierarchy: true },
+        },
+        "proj1",
+        false
+      );
+      expect(result.content[0].text).toBe(JSON.stringify({ cloneOperationResponse: { id: 99, state: "queued" }, destinationTestPlan: { id: 200, name: "Cloned Plan" } }, null, 2));
+    });
+
+    it("should skip auto-discovery and use the given sourceSuiteIds as-is when provided", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      (global.fetch as jest.Mock) = jest.fn();
+      (mockTestPlanApi.cloneTestPlan as jest.Mock).mockResolvedValue({ cloneOperationResponse: { id: 99, state: "queued" } });
+
+      const params = {
+        action: "clone" as const,
+        project: "proj1",
+        sourcePlanId: 100,
+        sourceSuiteIds: [101, 102],
+        name: "Cloned Plan",
+        iteration: "Sprint 2",
+        duplicateTestCases: true,
+      };
+      await handler(params);
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(mockTestPlanApi.cloneTestPlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceTestPlan: { id: 100, suiteIds: [101, 102] },
+          cloneOptions: { copyAllSuites: false, copyAncestorHierarchy: true },
+        }),
+        "proj1",
+        true
+      );
+    });
+
+    it("should paginate through continuationToken pages when auto-discovering suites", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const page1 = {
+        ok: true,
+        status: 200,
+        json: jest.fn().mockResolvedValue({
+          value: [
+            { id: 100, name: "Root" },
+            { id: 101, name: "Child 1", parentSuite: { id: 100 } },
+          ],
+        }),
+        text: jest.fn().mockResolvedValue(""),
+        headers: { get: (key: string) => (key === "x-ms-continuationtoken" ? "page2token" : null) },
+      };
+      const page2 = {
+        ok: true,
+        status: 200,
+        json: jest.fn().mockResolvedValue({ value: [{ id: 102, name: "Child 2", parentSuite: { id: 100 } }] }),
+        text: jest.fn().mockResolvedValue(""),
+        headers: { get: () => null },
+      };
+      (global.fetch as jest.Mock) = jest.fn().mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
+      (mockTestPlanApi.cloneTestPlan as jest.Mock).mockResolvedValue({ cloneOperationResponse: { id: 1, state: "queued" } });
+
+      await handler({ action: "clone" as const, project: "proj1", sourcePlanId: 100, name: "Cloned Plan", iteration: "Sprint 2" });
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining("continuationToken=page2token"),
+        expect.objectContaining({ headers: expect.objectContaining({ "User-Agent": "test-agent" }) })
+      );
+      expect(mockTestPlanApi.cloneTestPlan).toHaveBeenCalledWith(expect.objectContaining({ sourceTestPlan: { id: 100, suiteIds: [101, 102] } }), "proj1", false);
+    });
+
+    it("should return an error if auto-discovering source suites fails", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      (global.fetch as jest.Mock) = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: jest.fn().mockResolvedValue("Plan not found"),
+      });
+
+      const result = await handler({ action: "clone" as const, project: "proj1", sourcePlanId: 100, name: "Cloned Plan", iteration: "Sprint 2" });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error resolving source plan's suites before cloning");
+      expect(mockTestPlanApi.cloneTestPlan).not.toHaveBeenCalled();
+    });
+
+    it("should return error when sourcePlanId is missing for clone", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "clone" as const, project: "proj1", name: "Plan", iteration: "Sprint 2" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("sourcePlanId is required for clone");
+    });
+
+    it("should return error when name is missing for clone", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "clone" as const, project: "proj1", sourcePlanId: 100, iteration: "Sprint 2" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("name is required for clone");
+    });
+
+    it("should return error when iteration is missing for clone", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "clone" as const, project: "proj1", sourcePlanId: 100, name: "Plan" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("iteration is required for clone");
+    });
+
+    it("should handle API errors when cloning a test plan", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      mockFetchDescendantSuites([]);
+      (mockTestPlanApi.cloneTestPlan as jest.Mock).mockRejectedValue(new Error("API Error"));
+
+      const result = await handler({ action: "clone" as const, project: "proj1", sourcePlanId: 100, name: "Plan", iteration: "Sprint 2" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error cloning test plan");
+      expect(result.content[0].text).toContain("API Error");
+    });
+  });
+
+  describe("get_clone_status tool", () => {
+    it("should call the test-area cloneoperation endpoint directly with the correct parameters", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockConnection.rest.get as jest.Mock).mockResolvedValue({ result: { opId: 99, state: "succeeded" } });
+
+      const result = await handler({ action: "get_clone_status" as const, project: "proj1", cloneOperationId: 99 });
+
+      expect(mockConnection.rest.get).toHaveBeenCalledWith("https://dev.azure.com/testorg/proj1/_apis/test/cloneoperation/99?$includeDetails=true&api-version=5.0-preview.2");
+      expect(result.content[0].text).toBe(JSON.stringify({ opId: 99, state: "succeeded" }, null, 2));
+    });
+
+    it("should return error when cloneOperationId is missing", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "get_clone_status" as const, project: "proj1" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("cloneOperationId is required for get_clone_status");
+    });
+
+    it("should accept cloneOperationId 0 as a valid operation id", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockConnection.rest.get as jest.Mock).mockResolvedValue({ result: { opId: 0, state: "queued" } });
+
+      const result = await handler({ action: "get_clone_status" as const, project: "proj1", cloneOperationId: 0 });
+
+      expect(mockConnection.rest.get).toHaveBeenCalledWith("https://dev.azure.com/testorg/proj1/_apis/test/cloneoperation/0?$includeDetails=true&api-version=5.0-preview.2");
+      expect(result.isError).toBeUndefined();
+    });
+
+    it("should handle API errors when fetching clone status", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_plan_write");
+      if (!call) throw new Error("testplan_test_plan_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockConnection.rest.get as jest.Mock).mockRejectedValue(new Error("API Error"));
+
+      const result = await handler({ action: "get_clone_status" as const, project: "proj1", cloneOperationId: 99 } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error fetching clone status");
+      expect(result.content[0].text).toContain("API Error");
     });
   });
 
@@ -667,6 +936,36 @@ describe("configureTestPlanTools", () => {
         1
       );
       expect(result.content[0].text).toBe(JSON.stringify({ id: 10, name: "New Test Suite" }, null, 2));
+    });
+
+    it("should create a dynamic (query-based) suite when queryString is provided", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockTestPlanApi.createTestSuite as jest.Mock).mockResolvedValue({ id: 11, name: "Dynamic Suite", suiteType: 1 });
+      const params = {
+        action: "create" as const,
+        project: "proj1",
+        planId: 1,
+        parentSuiteId: 5,
+        name: "Dynamic Suite",
+        queryString: "SELECT [System.Id] FROM WorkItems WHERE [Custom.TargetRelease] = '26.2.6'",
+      };
+      const result = await handler(params);
+
+      expect(mockTestPlanApi.createTestSuite).toHaveBeenCalledWith(
+        {
+          name: "Dynamic Suite",
+          parentSuite: { id: 5, name: "" },
+          suiteType: 1,
+          queryString: params.queryString,
+        },
+        "proj1",
+        1
+      );
+      expect(result.content[0].text).toBe(JSON.stringify({ id: 11, name: "Dynamic Suite", suiteType: 1 }, null, 2));
     });
 
     it("should handle API errors when creating test suite", async () => {
@@ -997,6 +1296,66 @@ describe("configureTestPlanTools", () => {
       const result = await handler({ action: "unknown_action" as any, project: "proj1", filterActivePlans: true, includePlanDetails: false });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Unknown action: unknown_action");
+    });
+  });
+
+  describe("get_suite tool", () => {
+    it("should fetch a single suite's full details including queryString", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan");
+      if (!call) throw new Error("testplan tool not registered");
+      const [, , , handler] = call;
+
+      (global.fetch as jest.Mock) = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: jest.fn().mockResolvedValue({ id: 2, name: "User Story", suiteType: "dynamicTestSuite", queryString: "SELECT [System.Id] FROM WorkItems WHERE [Custom.TargetRelease] = '26.2.1'" }),
+        text: jest.fn().mockResolvedValue(""),
+        headers: { get: () => null },
+      });
+
+      const result = await handler({ action: "get_suite" as const, project: "proj1", planId: 1, suiteId: 2 });
+
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("proj1/_apis/testplan/Plans/1/Suites/2?"), expect.objectContaining({ method: "GET" }));
+      expect(result.content[0].text).toBe(
+        JSON.stringify({ id: 2, name: "User Story", suiteType: "dynamicTestSuite", queryString: "SELECT [System.Id] FROM WorkItems WHERE [Custom.TargetRelease] = '26.2.1'" }, null, 2)
+      );
+    });
+
+    it("should return error when planId is missing for get_suite", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan");
+      if (!call) throw new Error("testplan tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "get_suite" as const, project: "proj1", suiteId: 2 } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("planId is required for get_suite");
+    });
+
+    it("should return error when suiteId is missing for get_suite", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan");
+      if (!call) throw new Error("testplan tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "get_suite" as const, project: "proj1", planId: 1 } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("suiteId is required for get_suite");
+    });
+
+    it("should handle API errors when getting a suite", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan");
+      if (!call) throw new Error("testplan tool not registered");
+      const [, , , handler] = call;
+
+      (global.fetch as jest.Mock) = jest.fn().mockRejectedValue(new Error("API Error"));
+
+      const result = await handler({ action: "get_suite" as const, project: "proj1", planId: 1, suiteId: 2 });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error getting test suite");
+      expect(result.content[0].text).toContain("API Error");
     });
   });
 
@@ -3066,6 +3425,97 @@ describe("configureTestPlanTools", () => {
       const result = await handler({ action: "unknown_action" as any, project: "proj1" });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Unknown action: unknown_action");
+    });
+  });
+
+  describe("update_test_suite tool", () => {
+    it("should update a suite's queryString using the provided name", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockTestPlanApi.updateTestSuite as jest.Mock).mockResolvedValue({ id: 2, name: "User Story", queryString: "... Target Release ... 26.2.6 ..." });
+
+      const params = {
+        action: "update" as const,
+        project: "proj1",
+        planId: 1,
+        suiteId: 2,
+        name: "User Story",
+        queryString: "... Target Release ... 26.2.6 ...",
+      };
+      const result = await handler(params);
+
+      expect(mockTestPlanApi.getTestSuiteById).not.toHaveBeenCalled();
+      expect(mockTestPlanApi.updateTestSuite).toHaveBeenCalledWith({ name: "User Story", queryString: params.queryString }, "proj1", 1, 2);
+      expect(result.content[0].text).toBe(JSON.stringify({ id: 2, name: "User Story", queryString: "... Target Release ... 26.2.6 ..." }, null, 2));
+    });
+
+    it("should look up the current suite name when name is not provided", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockTestPlanApi.getTestSuiteById as jest.Mock).mockResolvedValue({ id: 2, name: "User Story" });
+      (mockTestPlanApi.updateTestSuite as jest.Mock).mockResolvedValue({ id: 2, name: "User Story", queryString: "new wiql" });
+
+      const params = { action: "update" as const, project: "proj1", planId: 1, suiteId: 2, queryString: "new wiql" };
+      const result = await handler(params);
+
+      expect(mockTestPlanApi.getTestSuiteById).toHaveBeenCalledWith("proj1", 1, 2);
+      expect(mockTestPlanApi.updateTestSuite).toHaveBeenCalledWith({ name: "User Story", queryString: "new wiql" }, "proj1", 1, 2);
+      expect(result.content[0].text).toBe(JSON.stringify({ id: 2, name: "User Story", queryString: "new wiql" }, null, 2));
+    });
+
+    it("should return error when planId is missing for update", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "update" as const, project: "proj1", suiteId: 2, queryString: "wiql" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("planId is required for update");
+    });
+
+    it("should return error when suiteId is missing for update", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "update" as const, project: "proj1", planId: 1, queryString: "wiql" } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("suiteId is required for update");
+    });
+
+    it("should return error when neither name nor queryString is provided for update", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "update" as const, project: "proj1", planId: 1, suiteId: 2 } as any);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("At least one of name or queryString is required for update");
+    });
+
+    it("should handle API errors when updating a test suite", async () => {
+      configureTestPlanTools(server, tokenProvider, connectionProvider);
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "testplan_test_suite_write");
+      if (!call) throw new Error("testplan_test_suite_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockTestPlanApi.updateTestSuite as jest.Mock).mockRejectedValue(new Error("API Error"));
+
+      const params = { action: "update" as const, project: "proj1", planId: 1, suiteId: 2, name: "User Story", queryString: "wiql" };
+      const result = await handler(params);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error updating test suite");
+      expect(result.content[0].text).toContain("API Error");
     });
   });
 });

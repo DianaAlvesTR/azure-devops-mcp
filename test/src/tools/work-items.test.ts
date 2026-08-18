@@ -51,6 +51,9 @@ interface WorkItemTrackingApiMock {
   getQuery: jest.Mock;
   queryById: jest.Mock;
   queryByWiql: jest.Mock;
+  createQuery: jest.Mock;
+  updateQuery: jest.Mock;
+  deleteQuery: jest.Mock;
   getAttachmentContent: jest.Mock;
 }
 
@@ -96,6 +99,9 @@ describe("configureWorkItemTools", () => {
       getQuery: jest.fn(),
       queryById: jest.fn(),
       queryByWiql: jest.fn(),
+      createQuery: jest.fn(),
+      updateQuery: jest.fn(),
+      deleteQuery: jest.fn(),
       getAttachmentContent: jest.fn(),
     };
 
@@ -2020,6 +2026,101 @@ describe("configureWorkItemTools", () => {
       expect(mockWorkItemTrackingApi.getQuery).toHaveBeenCalledWith(params.project, params.query, QueryExpand.None, params.depth, params.includeDeleted, params.useIsoDateFormat);
 
       expect(result.content[0].text).toBe(JSON.stringify([_mockQuery], null, 2));
+    });
+  });
+
+  describe("wit_query_write tool", () => {
+    it("should call workItemApi.createQuery with the correct parameters and return the expected result", async () => {
+      configureWorkItemTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "wit_query_write");
+      if (!call) throw new Error("wit_query_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockWorkItemTrackingApi.createQuery as jest.Mock).mockResolvedValue(_mockQuery);
+
+      const params = {
+        project: "Contoso",
+        query: "Shared Queries/My Folder",
+        name: "My New Query",
+        wiql: "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project",
+      };
+
+      const result = await handler({ action: "create", ...params });
+
+      expect(mockWorkItemTrackingApi.createQuery).toHaveBeenCalledWith({ name: params.name, wiql: params.wiql, isFolder: undefined }, params.project, params.query, undefined);
+      expect(result.content[0].text).toBe(JSON.stringify(_mockQuery, null, 2));
+    });
+
+    it("should call workItemApi.updateQuery with the correct parameters and return the expected result", async () => {
+      configureWorkItemTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "wit_query_write");
+      if (!call) throw new Error("wit_query_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockWorkItemTrackingApi.updateQuery as jest.Mock).mockResolvedValue(_mockQuery);
+
+      const params = {
+        project: "Contoso",
+        query: "342f0f44-4069-46b1-a940-3d0468979ceb",
+        wiql: "SELECT [System.Id] FROM WorkItems WHERE [Custom.TargetRelease] = '26.2.6'",
+      };
+
+      const result = await handler({ action: "update", ...params });
+
+      expect(mockWorkItemTrackingApi.updateQuery).toHaveBeenCalledWith({ wiql: params.wiql }, params.project, params.query, undefined);
+      expect(result.content[0].text).toBe(JSON.stringify(_mockQuery, null, 2));
+    });
+
+    it("should require at least one field to update", async () => {
+      configureWorkItemTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "wit_query_write");
+      if (!call) throw new Error("wit_query_write tool not registered");
+      const [, , , handler] = call;
+
+      const result = await handler({ action: "update", project: "Contoso", query: "342f0f44-4069-46b1-a940-3d0468979ceb" });
+
+      expect(result.isError).toBe(true);
+      expect(mockWorkItemTrackingApi.updateQuery).not.toHaveBeenCalled();
+    });
+
+    it("should call workItemApi.deleteQuery with the correct parameters", async () => {
+      configureWorkItemTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "wit_query_write");
+      if (!call) throw new Error("wit_query_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockWorkItemTrackingApi.deleteQuery as jest.Mock).mockResolvedValue(undefined);
+
+      const params = { project: "Contoso", query: "342f0f44-4069-46b1-a940-3d0468979ceb" };
+      const result = await handler({ action: "delete", ...params });
+
+      expect(mockWorkItemTrackingApi.deleteQuery).toHaveBeenCalledWith(params.project, params.query);
+      expect(result.content[0].text).toContain("deleted successfully");
+    });
+
+    it("should handle createQuery errors", async () => {
+      configureWorkItemTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === "wit_query_write");
+      if (!call) throw new Error("wit_query_write tool not registered");
+      const [, , , handler] = call;
+
+      (mockWorkItemTrackingApi.createQuery as jest.Mock).mockRejectedValue(new Error("API Error"));
+
+      const result = await handler({
+        action: "create",
+        project: "Contoso",
+        query: "Shared Queries/My Folder",
+        name: "My New Query",
+        wiql: "SELECT [System.Id] FROM WorkItems",
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe("Error creating query: API Error");
     });
   });
 

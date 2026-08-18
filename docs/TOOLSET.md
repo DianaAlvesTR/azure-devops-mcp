@@ -51,6 +51,9 @@ This page lists all available tools provided by the local Azure DevOps MCP serve
 | [wit_query](#wit_query)                                     | `get`                  | Get a work item query by ID or path                                     |
 | [wit_query](#wit_query)                                     | `get_results`          | Execute a saved query and return results                                |
 | [wit_query](#wit_query)                                     | `wiql`                 | Execute an ad-hoc WIQL query                                            |
+| [wit_query_write](#wit_query_write)                         | `create`               | Create a new saved query or query folder                                |
+| [wit_query_write](#wit_query_write)                         | `update`               | Update an existing query's WIQL, name, or path                          |
+| [wit_query_write](#wit_query_write)                         | `delete`               | Delete a query or query folder                                          |
 | [wit_backlog](#wit_backlog)                                 | `list`                 | List backlog levels for a team                                          |
 | [wit_backlog](#wit_backlog)                                 | `list_work_items`      | Get work items in a specific backlog level                              |
 | [wit_backlog](#wit_backlog)                                 | `reorder`              | Reorder work items in a backlog or iteration                            |
@@ -109,17 +112,21 @@ This page lists all available tools provided by the local Azure DevOps MCP serve
 
 > **Note:** The test plan tools are being aligned with the [Azure DevOps remote MCP server](https://learn.microsoft.com/en-us/azure/devops/mcp-server/remote-mcp-server?view=azure-devops#test-plans) tool structure.
 
-| Tool                                                                                  | Action           | Description                            |
-| ------------------------------------------------------------------------------------- | ---------------- | -------------------------------------- |
-| [testplan](#testplan)                                                                 | `list_plans`     | List test plans in a project           |
-| [testplan](#testplan)                                                                 | `list_suites`    | List test suites under a test plan     |
-| [testplan](#testplan)                                                                 | `list_cases`     | List test cases under a test suite     |
-| [testplan_show_test_results_from_build_id](#testplan_show_test_results_from_build_id) |                  | Get test results for a specific build  |
-| [testplan_test_plan_write](#testplan_test_plan_write)                                 | `create`         | Create a new test plan                 |
-| [testplan_test_suite_write](#testplan_test_suite_write)                               | `create`         | Create a test suite within a test plan |
-| [testplan_test_suite_write](#testplan_test_suite_write)                               | `add_test_cases` | Add test cases to a test suite         |
-| [testplan_test_case_write](#testplan_test_case_write)                                 | `create`         | Create a new test case work item       |
-| [testplan_test_case_write](#testplan_test_case_write)                                 | `update_steps`   | Update steps of an existing test case  |
+| Tool                                                                                  | Action             | Description                                                                                     |
+| ------------------------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------- |
+| [testplan](#testplan)                                                                 | `list_plans`       | List test plans in a project                                                                    |
+| [testplan](#testplan)                                                                 | `list_suites`      | List test suites under a test plan                                                              |
+| [testplan](#testplan)                                                                 | `list_cases`       | List test cases under a test suite                                                              |
+| [testplan](#testplan)                                                                 | `get_suite`        | Get full details of a single suite, including its queryString                                   |
+| [testplan_show_test_results_from_build_id](#testplan_show_test_results_from_build_id) |                    | Get test results for a specific build                                                           |
+| [testplan_test_plan_write](#testplan_test_plan_write)                                 | `create`           | Create a new empty test plan                                                                    |
+| [testplan_test_plan_write](#testplan_test_plan_write)                                 | `clone`            | Clone an existing test plan and its suites (same as "Copy test plan" in the ADO UI)             |
+| [testplan_test_plan_write](#testplan_test_plan_write)                                 | `get_clone_status` | Poll the status of a clone operation                                                            |
+| [testplan_test_suite_write](#testplan_test_suite_write)                               | `create`           | Create a test suite within a test plan                                                          |
+| [testplan_test_suite_write](#testplan_test_suite_write)                               | `add_test_cases`   | Add test cases to a test suite                                                                  |
+| [testplan_test_suite_write](#testplan_test_suite_write)                               | `update`           | Rename a suite or update a dynamic/requirement-based suite's query string (e.g. Target Release) |
+| [testplan_test_case_write](#testplan_test_case_write)                                 | `create`           | Create a new test case work item                                                                |
+| [testplan_test_case_write](#testplan_test_case_write)                                 | `update_steps`     | Update steps of an existing test case                                                           |
 
 ### Wiki
 
