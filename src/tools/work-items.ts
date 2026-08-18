@@ -16,6 +16,7 @@ import { getUserIdentityFromEmail } from "./auth.js";
 const WORKITEM_TOOLS = {
   wit_work_item: "wit_work_item",
   wit_query: "wit_query",
+  wit_query_write: "wit_query_write",
   wit_backlog: "wit_backlog",
   wit_work_item_attachment: "wit_work_item_attachment",
   wit_work_item_write: "wit_work_item_write",
@@ -363,6 +364,79 @@ function configureWorkItemTools(server: McpServer, tokenProvider: () => Promise<
           get: `Error retrieving query: ${errorMessage}`,
           get_results: `Error retrieving query results: ${errorMessage}`,
           wiql: `Error executing WIQL query: ${errorMessage}`,
+        };
+        return { content: [{ type: "text", text: msgs[action] ?? `Error: ${errorMessage}` }], isError: true };
+      }
+    }
+  );
+
+  // --- wit_query_write ----------------------------------------------------------
+  server.tool(
+    WORKITEM_TOOLS.wit_query_write,
+    "Write operations for saved work item queries (shared or folder). Use the action parameter to specify the operation.",
+    {
+      action: z
+        .enum(["create", "update", "delete"])
+        .describe("The action to perform. Options: create (create a new query or folder), update (update an existing query's WIQL, name, or path), delete (delete a query or folder)."),
+      project: z.string().optional().describe("The name or ID of the Azure DevOps project. Reuse from prior context if already known. If not provided, a project selection prompt will be shown."),
+      query: z
+        .string()
+        .describe(
+          "For create: the path of the parent folder under which the new query/folder is created (e.g. 'Shared Queries/My Folder'). For update/delete: the ID or path of the existing query/folder to modify."
+        ),
+      name: z.string().optional().describe("Name of the query or folder. Required for: create."),
+      wiql: z.string().max(32768).optional().describe("The WIQL text of the query. Required for: create (unless isFolder is true). Used for: update, to replace the query's WIQL."),
+      isFolder: z.boolean().optional().describe("Whether this item is a folder rather than a query. Used for: create."),
+      newName: z.string().optional().describe("New name for the query/folder (rename). Used for: update."),
+      newPath: z.string().optional().describe("New parent folder path to move the query/folder into. Used for: update."),
+      validateWiqlOnly: z.boolean().optional().describe("If true, only validates the WIQL without creating the query. Used for: create."),
+      undeleteDescendants: z.boolean().optional().describe("If true, undeletes descendants when updating a previously-deleted folder. Used for: update."),
+    },
+    async ({ action, project, query, name, wiql, isFolder, newName, newPath, validateWiqlOnly, undeleteDescendants }) => {
+      try {
+        const connection = await connectionProvider();
+
+        let resolvedProject = project;
+        if (!resolvedProject) {
+          const result = await elicitProject(server, connection, `Select the Azure DevOps project for ${action}.`);
+          if ("response" in result) return result.response;
+          resolvedProject = result.resolved;
+        }
+
+        const workItemApi = await connection.getWorkItemTrackingApi();
+
+        if (action === "create") {
+          if (!name) return { content: [{ type: "text", text: "name is required for create" }], isError: true };
+          if (!isFolder && !wiql) return { content: [{ type: "text", text: "wiql is required for create unless isFolder is true" }], isError: true };
+          const postedQuery = { name, wiql, isFolder };
+          const created = await workItemApi.createQuery(postedQuery, resolvedProject, query, validateWiqlOnly);
+          return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+        }
+
+        if (action === "update") {
+          const queryUpdate: { name?: string; wiql?: string; path?: string } = {};
+          if (newName) queryUpdate.name = newName;
+          if (wiql) queryUpdate.wiql = wiql;
+          if (newPath) queryUpdate.path = newPath;
+          if (Object.keys(queryUpdate).length === 0) {
+            return { content: [{ type: "text", text: "At least one of wiql, newName, or newPath is required for update" }], isError: true };
+          }
+          const updated = await workItemApi.updateQuery(queryUpdate, resolvedProject, query, undeleteDescendants);
+          return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+        }
+
+        if (action === "delete") {
+          await workItemApi.deleteQuery(resolvedProject, query);
+          return { content: [{ type: "text", text: `Query '${query}' deleted successfully.` }] };
+        }
+
+        return { content: [{ type: "text", text: `Unknown action: ${action}` }], isError: true };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        const msgs: Record<string, string> = {
+          create: `Error creating query: ${errorMessage}`,
+          update: `Error updating query: ${errorMessage}`,
+          delete: `Error deleting query: ${errorMessage}`,
         };
         return { content: [{ type: "text", text: msgs[action] ?? `Error: ${errorMessage}` }], isError: true };
       }

@@ -15,6 +15,46 @@ const TEST_PLAN_TOOLS = {
   testplan_test_case_write: "testplan_test_case_write",
 };
 
+// The ADO clone-test-plan API's `cloneOptions.copyAllSuites` flag does not reliably clone the
+// full suite tree on its own (observed empirically: it can leave the destination plan with only
+// its root suite and zero test cases, with no error surfaced). Explicitly listing every
+// descendant suite ID in `sourceTestPlan.suiteIds` is what actually works. This helper discovers
+// those IDs (everything under the plan's root suite) so callers can omit `sourceSuiteIds` and
+// still get a full clone.
+async function fetchDescendantSuiteIds(connection: WebApi, tokenProvider: () => Promise<string>, userAgentProvider: (() => string) | undefined, project: string, planId: number): Promise<number[]> {
+  const accessToken = await tokenProvider();
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  const userAgent = userAgentProvider?.();
+  if (userAgent) headers["User-Agent"] = userAgent;
+
+  const descendantIds: number[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ "api-version": apiVersion });
+    if (continuationToken) params.append("continuationToken", continuationToken);
+    const url = `${connection.serverUrl}/${encodeURIComponent(project)}/_apis/testplan/Plans/${planId}/Suites?${params.toString()}`;
+
+    const response = await fetch(url, { method: "GET", headers });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to list source plan's suites (${response.status}): ${errorText}`);
+    }
+
+    const body = await response.json();
+    const suites = body.value ?? [];
+    for (const suite of suites) {
+      // The root suite (no parentSuite) represents the plan itself, not a suite to clone.
+      if (suite.parentSuite?.id) {
+        descendantIds.push(suite.id);
+      }
+    }
+    continuationToken = response.headers.get("x-ms-continuationtoken") ?? undefined;
+  } while (continuationToken);
+
+  return descendantIds;
+}
+
 function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<string>, connectionProvider: () => Promise<WebApi>, userAgentProvider?: () => string) {
   // ─── testplan (read-only) ────────────────────────────────────────────
   server.tool(
@@ -22,13 +62,15 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
     "Retrieve paginated test plan, suite, and case data for a project. Use the action parameter to specify the operation. When a response includes a continuationToken, pass it back with the same action and query parameters to fetch the next batch; null token indicates the last batch.",
     {
       action: z
-        .enum(["list_plans", "list_suites", "list_cases"])
-        .describe("The action to perform. Options: list_plans (list test plans in a project), list_suites (list test suites under a test plan), list_cases (list test cases under a test suite)."),
+        .enum(["list_plans", "list_suites", "list_cases", "get_suite"])
+        .describe(
+          "The action to perform. Options: list_plans (list test plans in a project), list_suites (list test suites under a test plan), list_cases (list test cases under a test suite), get_suite (get full details of a single suite, including its queryString for dynamic/requirement-based suites)."
+        ),
       project: z.string().describe("The unique identifier (ID or name) of the Azure DevOps project."),
       filterActivePlans: z.boolean().default(true).describe("Filter to include only active test plans. Used for: list_plans. Defaults to true."),
       includePlanDetails: z.boolean().default(false).describe("Include detailed information about each test plan. Used for: list_plans."),
-      planId: z.coerce.number().min(1).optional().describe("The ID of the test plan. Required for: list_suites, list_cases."),
-      suiteId: z.coerce.number().min(1).optional().describe("The ID of the test suite. Required for: list_cases."),
+      planId: z.coerce.number().min(1).optional().describe("The ID of the test plan. Required for: list_suites, list_cases, get_suite."),
+      suiteId: z.coerce.number().min(1).optional().describe("The ID of the test suite. Required for: list_cases, get_suite."),
       continuationToken: z.string().optional().describe("Token to continue fetching results from a previous request. Used for: list_plans, list_suites, list_cases."),
     },
     async ({ action, project, filterActivePlans, includePlanDetails, planId, suiteId, continuationToken }) => {
@@ -141,13 +183,34 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
           if (nextToken) result.continuationToken = nextToken;
 
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } else if (action === "get_suite") {
+          if (!planId) return { content: [{ type: "text", text: "planId is required for get_suite" }], isError: true };
+          if (!suiteId) return { content: [{ type: "text", text: "suiteId is required for get_suite" }], isError: true };
+
+          const params = new URLSearchParams({ "api-version": apiVersion });
+          const url = `${connection.serverUrl}/${encodeURIComponent(project)}/_apis/testplan/Plans/${planId}/Suites/${suiteId}?${params.toString()}`;
+
+          const response = await fetch(url, { method: "GET", headers });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Failed to get test suite (${response.status}): ${errorText}`);
+          }
+
+          const suite = await response.json();
+          return { content: [{ type: "text", text: JSON.stringify(suite, null, 2) }] };
         }
         return { content: [{ type: "text", text: `Unknown action: ${action}` }], isError: true };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-        const prefix = action === "list_plans" ? "Error listing test plans" : action === "list_suites" ? "Error listing test suites" : "Error listing test cases";
+        const prefixes: Record<string, string> = {
+          list_plans: "Error listing test plans",
+          list_suites: "Error listing test suites",
+          list_cases: "Error listing test cases",
+          get_suite: "Error getting test suite",
+        };
         return {
-          content: [{ type: "text", text: `${prefix}: ${errorMessage}` }],
+          content: [{ type: "text", text: `${prefixes[action] ?? "Error"}: ${errorMessage}` }],
           isError: true,
         };
       }
@@ -213,41 +276,124 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
     TEST_PLAN_TOOLS.testplan_test_plan_write,
     "Write operations for test plans. Use the action parameter to specify the operation.",
     {
-      action: z.enum(["create"]).describe("The action to perform. Options: create (create a new test plan)."),
+      action: z
+        .enum(["create", "clone", "get_clone_status"])
+        .describe(
+          "The action to perform. Options: create (create a new empty test plan), clone (clone an existing test plan and its suites — same operation as the 'Copy test plan' button in the ADO UI), get_clone_status (poll a clone operation started by 'clone')."
+        ),
       project: z.string().describe("The unique identifier (ID or name) of the Azure DevOps project."),
-      name: z.string().optional().describe("The name of the test plan. Required for: create."),
-      iteration: z.string().optional().describe("The iteration path for the test plan. Required for: create."),
-      description: z.string().optional().describe("The description of the test plan. Used for: create."),
-      startDate: z.string().optional().describe("The start date of the test plan. Used for: create."),
-      endDate: z.string().optional().describe("The end date of the test plan. Used for: create."),
-      areaPath: z.string().optional().describe("The area path for the test plan. Used for: create."),
+      name: z.string().optional().describe("The name of the test plan. Required for: create, clone (name of the destination plan)."),
+      iteration: z.string().optional().describe("The iteration path for the test plan. Required for: create, clone."),
+      description: z.string().optional().describe("The description of the test plan. Used for: create, clone."),
+      startDate: z.string().optional().describe("The start date of the test plan. Used for: create, clone."),
+      endDate: z.string().optional().describe("The end date of the test plan. Used for: create, clone."),
+      areaPath: z.string().optional().describe("The area path for the test plan. Used for: create, clone."),
+      sourcePlanId: z.coerce.number().min(1).optional().describe("The ID of the test plan to clone from. Required for: clone."),
+      sourceSuiteIds: z
+        .array(z.coerce.number())
+        .optional()
+        .describe(
+          "Specific suite IDs to clone. Used for: clone. IMPORTANT: the ADO API does NOT recurse — listing a suite here does not automatically include its descendants, so include every nested suite ID individually if you pass this explicitly. Omit this parameter entirely (recommended) to have the tool automatically discover and include every suite in the source plan."
+        ),
+      duplicateTestCases: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Used for: clone. false (default, recommended) references the same Test Case work items in the new plan without duplicating them — matches the 'Reference existing test cases' option in the ADO UI. true creates brand-new duplicate Test Case work items ('Duplicate existing test cases' in the ADO UI) — only set this if the Owner explicitly asked for duplicates."
+        ),
+      cloneOperationId: z.coerce.number().min(0).optional().describe("The clone operation ID returned by 'clone' (0 is a valid operation ID). Required for: get_clone_status."),
     },
-    async ({ project, name, iteration, description, startDate, endDate, areaPath }) => {
+    async ({ action, project, name, iteration, description, startDate, endDate, areaPath, sourcePlanId, sourceSuiteIds, duplicateTestCases, cloneOperationId }) => {
       try {
-        if (!name) return { content: [{ type: "text", text: "name is required for create" }], isError: true };
-        if (!iteration) return { content: [{ type: "text", text: "iteration is required for create" }], isError: true };
-
         const connection = await connectionProvider();
         const testPlanApi = await connection.getTestPlanApi();
 
-        const testPlanToCreate: TestPlanCreateParams = {
-          name,
-          iteration,
-          description,
-          startDate: startDate ? new Date(startDate) : undefined,
-          endDate: endDate ? new Date(endDate) : undefined,
-          areaPath,
-        };
+        if (action === "create") {
+          if (!name) return { content: [{ type: "text", text: "name is required for create" }], isError: true };
+          if (!iteration) return { content: [{ type: "text", text: "iteration is required for create" }], isError: true };
 
-        const createdTestPlan = await testPlanApi.createTestPlan(testPlanToCreate, project);
+          const testPlanToCreate: TestPlanCreateParams = {
+            name,
+            iteration,
+            description,
+            startDate: startDate ? new Date(startDate) : undefined,
+            endDate: endDate ? new Date(endDate) : undefined,
+            areaPath,
+          };
 
-        return {
-          content: [{ type: "text", text: JSON.stringify(createdTestPlan, null, 2) }],
-        };
+          const createdTestPlan = await testPlanApi.createTestPlan(testPlanToCreate, project);
+
+          return {
+            content: [{ type: "text", text: JSON.stringify(createdTestPlan, null, 2) }],
+          };
+        } else if (action === "clone") {
+          if (!sourcePlanId) return { content: [{ type: "text", text: "sourcePlanId is required for clone" }], isError: true };
+          if (!name) return { content: [{ type: "text", text: "name is required for clone" }], isError: true };
+          if (!iteration) return { content: [{ type: "text", text: "iteration is required for clone" }], isError: true };
+
+          let suiteIdsToClone = sourceSuiteIds;
+          if (!suiteIdsToClone || suiteIdsToClone.length === 0) {
+            try {
+              suiteIdsToClone = await fetchDescendantSuiteIds(connection, tokenProvider, userAgentProvider, project, sourcePlanId);
+            } catch (fetchError) {
+              const fetchErrorMessage = fetchError instanceof Error ? fetchError.message : "Unknown error occurred";
+              return { content: [{ type: "text", text: `Error resolving source plan's suites before cloning: ${fetchErrorMessage}` }], isError: true };
+            }
+          }
+
+          const cloneRequestBody = {
+            sourceTestPlan: {
+              id: sourcePlanId,
+              suiteIds: suiteIdsToClone,
+            },
+            destinationTestPlan: {
+              name,
+              iteration,
+              description,
+              startDate: startDate ? new Date(startDate) : undefined,
+              endDate: endDate ? new Date(endDate) : undefined,
+              areaPath,
+              project,
+            },
+            cloneOptions: {
+              // Always pass explicit suiteIds (resolved above) rather than relying on
+              // copyAllSuites — see fetchDescendantSuiteIds for why.
+              copyAllSuites: false,
+              copyAncestorHierarchy: true,
+            },
+          };
+
+          const cloneResult = await testPlanApi.cloneTestPlan(cloneRequestBody, project, duplicateTestCases ?? false);
+
+          return {
+            content: [{ type: "text", text: JSON.stringify(cloneResult, null, 2) }],
+          };
+        } else if (action === "get_clone_status") {
+          if (cloneOperationId === undefined) return { content: [{ type: "text", text: "cloneOperationId is required for get_clone_status" }], isError: true };
+
+          // TestPlanApi.getCloneInformation() calls a 'testplan' area endpoint that returns
+          // "does not support http method 'GET'" for plan-level clone operations — a mismatch
+          // between the SDK and the actual API. The working endpoint for plan clone status is
+          // under the older 'test' API area (see Microsoft Learn: Test / Clone Operation - Get),
+          // so we call it directly instead of going through TestPlanApi.
+          const cloneStatusUrl = `${connection.serverUrl}/${encodeURIComponent(project)}/_apis/test/cloneoperation/${cloneOperationId}?$includeDetails=true&api-version=5.0-preview.2`;
+          const cloneStatusResponse = await connection.rest.get(cloneStatusUrl);
+
+          return {
+            content: [{ type: "text", text: JSON.stringify(cloneStatusResponse.result, null, 2) }],
+          };
+        }
+        return { content: [{ type: "text", text: `Unknown action: ${action}` }], isError: true };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        const msgs: Record<string, string> = {
+          create: `Error creating test plan: ${errorMessage}`,
+          clone: `Error cloning test plan: ${errorMessage}`,
+          get_clone_status: `Error fetching clone status: ${errorMessage}`,
+        };
         return {
-          content: [{ type: "text", text: `Error creating test plan: ${errorMessage}` }],
+          content: [{ type: "text", text: msgs[action] ?? `Error: ${errorMessage}` }],
           isError: true,
         };
       }
@@ -260,16 +406,24 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
     "Write operations for test suites. Use the action parameter to specify the operation.",
     {
       action: z
-        .enum(["create", "add_test_cases"])
-        .describe("The action to perform. Options: create (create a new test suite in a test plan), add_test_cases (add existing test cases to a test suite)."),
+        .enum(["create", "add_test_cases", "update"])
+        .describe(
+          "The action to perform. Options: create (create a new test suite in a test plan), add_test_cases (add existing test cases to a test suite), update (update an existing suite's name or dynamic query string)."
+        ),
       project: z.string().describe("The unique identifier (ID or name) of the Azure DevOps project."),
-      planId: z.coerce.number().min(1).optional().describe("The ID of the test plan. Required for: create, add_test_cases."),
+      planId: z.coerce.number().min(1).optional().describe("The ID of the test plan. Required for: create, add_test_cases, update."),
       parentSuiteId: z.coerce.number().min(1).optional().describe("ID of the parent suite under which the new suite will be created. Required for: create."),
-      name: z.string().optional().describe("Name of the child test suite. Required for: create."),
-      suiteId: z.coerce.number().min(1).optional().describe("The ID of the test suite. Required for: add_test_cases."),
+      name: z.string().optional().describe("Name of the child test suite. Required for: create. Used for: update (rename)."),
+      suiteId: z.coerce.number().min(1).optional().describe("The ID of the test suite. Required for: add_test_cases, update."),
       testCaseIds: z.string().or(z.array(z.string())).optional().describe("The ID(s) of the test case(s) to add. Required for: add_test_cases."),
+      queryString: z
+        .string()
+        .optional()
+        .describe(
+          "WIQL query string for a dynamic/requirement-based suite (e.g. to change a Target Release filter clause). Used for: update. If provided for create, creates a dynamic (query-based) suite instead of a static one."
+        ),
     },
-    async ({ action, project, planId, parentSuiteId, name, suiteId, testCaseIds }) => {
+    async ({ action, project, planId, parentSuiteId, name, suiteId, testCaseIds, queryString }) => {
       try {
         if (action === "create") {
           if (!planId) return { content: [{ type: "text", text: "planId is required for create" }], isError: true };
@@ -287,7 +441,8 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
               const testSuiteToCreate = {
                 name,
                 parentSuite: { id: parentSuiteId, name: "" },
-                suiteType: 2,
+                suiteType: queryString ? 1 : 2, // 1 = DynamicTestSuite (query-based), 2 = StaticTestSuite
+                queryString,
               };
 
               const createdTestSuite = await testPlanApi.createTestSuite(testSuiteToCreate, project, planId);
@@ -331,12 +486,39 @@ function configureTestPlanTools(server: McpServer, tokenProvider: () => Promise<
           return {
             content: [{ type: "text", text: JSON.stringify(addedTestCases, null, 2) }],
           };
+        } else if (action === "update") {
+          if (!planId) return { content: [{ type: "text", text: "planId is required for update" }], isError: true };
+          if (!suiteId) return { content: [{ type: "text", text: "suiteId is required for update" }], isError: true };
+          if (!name && !queryString) return { content: [{ type: "text", text: "At least one of name or queryString is required for update" }], isError: true };
+
+          const connection = await connectionProvider();
+          const testPlanApi = await connection.getTestPlanApi();
+
+          let resolvedName = name;
+          if (!resolvedName) {
+            const currentSuite = await testPlanApi.getTestSuiteById(project, planId, suiteId);
+            resolvedName = currentSuite.name;
+          }
+          if (!resolvedName) return { content: [{ type: "text", text: "Unable to resolve current suite name for update" }], isError: true };
+
+          const testSuiteUpdateParams: { name: string; queryString?: string } = { name: resolvedName };
+          if (queryString) testSuiteUpdateParams.queryString = queryString;
+
+          const updatedTestSuite = await testPlanApi.updateTestSuite(testSuiteUpdateParams, project, planId, suiteId);
+
+          return {
+            content: [{ type: "text", text: JSON.stringify(updatedTestSuite, null, 2) }],
+          };
         }
         return { content: [{ type: "text", text: `Unknown action: ${action}` }], isError: true };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        const msgs: Record<string, string> = {
+          add_test_cases: `Error adding test cases to suite: ${errorMessage}`,
+          update: `Error updating test suite: ${errorMessage}`,
+        };
         return {
-          content: [{ type: "text", text: `Error adding test cases to suite: ${errorMessage}` }],
+          content: [{ type: "text", text: msgs[action] ?? `Error: ${errorMessage}` }],
           isError: true,
         };
       }
