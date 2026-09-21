@@ -6,6 +6,7 @@ import { WebApi } from "azure-devops-node-api";
 
 import { Domain } from "./shared/domains.js";
 import { configureAdvSecTools } from "./tools/advanced-security.js";
+import { configureDashboardTools } from "./tools/dashboards.js";
 import { configureMcpAppsTools } from "./tools/mcp-apps.js";
 import { configurePipelineTools } from "./tools/pipelines.js";
 import { configureCoreTools } from "./tools/core.js";
@@ -33,6 +34,7 @@ function configureAllTools(server: McpServer, tokenProvider: () => Promise<strin
   configureIfDomainEnabled(Domain.TEST_PLANS, () => configureTestPlanTools(server, tokenProvider, connectionProvider, userAgentProvider));
   configureIfDomainEnabled(Domain.SEARCH, () => configureSearchTools(server, tokenProvider, connectionProvider, userAgentProvider));
   configureIfDomainEnabled(Domain.ADVANCED_SECURITY, () => configureAdvSecTools(server, tokenProvider, connectionProvider));
+  configureIfDomainEnabled(Domain.DASHBOARD, () => configureDashboardTools(server, connectionProvider));
 }
 
 export { configureAllTools };

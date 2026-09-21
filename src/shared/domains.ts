@@ -17,6 +17,7 @@ export enum Domain {
   WORK = "work",
   WORK_ITEMS = "work-items",
   MCP_APPS = "mcp-apps",
+  DASHBOARD = "dashboard",
 }
 
 export const ALL_DOMAINS = "all";
@@ -96,7 +97,13 @@ export class DomainsManager {
 
   private enableAllDomains(): void {
     Object.values(Domain)
-      .filter((domain) => domain !== Domain.MCP_APPS)
+      // MCP_APPS is opt-in only (meta-tooling). DASHBOARD is opt-in only because it requires
+      // PAT authentication specifically — the interactive OAuth token used by every other
+      // domain does not carry the vso.dashboards_manage scope (confirmed empirically: TF400813
+      // on every dashboard call, resolved by switching that one call to a PAT with "Dashboards:
+      // Read and manage" scoped explicitly). Enabling it under "all" would silently register
+      // tools that fail for anyone running with interactive auth.
+      .filter((domain) => domain !== Domain.MCP_APPS && domain !== Domain.DASHBOARD)
       .forEach((domain) => this.enabledDomains.add(domain));
   }
 

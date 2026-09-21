@@ -22,7 +22,14 @@ function isGitHubCodespaceEnv(): boolean {
   return process.env.CODESPACES === "true" && !!process.env.CODESPACE_NAME;
 }
 
-const defaultAuthenticationType = isGitHubCodespaceEnv() ? "azcli" : "interactive";
+// ADO_MCP_AUTH_TYPE / ADO_MCP_DOMAINS let CLI-arg-only config be set via `-e` env vars instead —
+// needed because passing extra flags after the `--` in `claude mcp add ... -- node ... --flag`
+// does not reliably survive PowerShell's argv forwarding on Windows (observed empirically: the
+// flags after `--` get re-parsed by claude's own CLI and rejected as "unknown option"). `-e
+// KEY=VALUE` does not have that problem, so env vars are the robust way to configure a
+// registration that needs authentication/domains different from the defaults.
+const defaultAuthenticationType = isGitHubCodespaceEnv() ? "azcli" : (process.env.ADO_MCP_AUTH_TYPE ?? "interactive");
+const defaultDomains = process.env.ADO_MCP_DOMAINS ? process.env.ADO_MCP_DOMAINS.split(",") : "all";
 
 // Parse command line arguments using yargs
 const argv = yargs(hideBin(process.argv))
@@ -41,7 +48,7 @@ const argv = yargs(hideBin(process.argv))
     describe: "Domain(s) to enable: 'all' for everything, or specific domains like 'repositories builds work'. Defaults to 'all'.",
     type: "string",
     array: true,
-    default: "all",
+    default: defaultDomains,
   })
   .option("authentication", {
     alias: "a",

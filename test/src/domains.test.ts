@@ -90,7 +90,7 @@ describe("DomainsManager: backward compatibility and domain enabling", () => {
 
       expect(enabledDomains.size).toBe(9);
       expect(errorSpy).toHaveBeenCalledWith(
-        "Error: Specified invalid domain 'invalid-domain'. Please specify exactly as available domains: advanced-security, pipelines, core, repositories, search, test-plans, wiki, work, work-items"
+        "Error: Specified invalid domain 'invalid-domain'. Please specify exactly as available domains: advanced-security, pipelines, core, repositories, search, test-plans, wiki, work, work-items, dashboard"
       );
     });
   });
@@ -164,8 +164,8 @@ describe("DomainsManager: backward compatibility and domain enabling", () => {
     it("returns the full list of available domains", () => {
       const availableDomains = DomainsManager.getAvailableDomains();
 
-      expect(availableDomains).toEqual(["advanced-security", "pipelines", "core", "repositories", "search", "test-plans", "wiki", "work", "work-items", "mcp-apps"]);
-      expect(availableDomains.length).toBe(10);
+      expect(availableDomains).toEqual(["advanced-security", "pipelines", "core", "repositories", "search", "test-plans", "wiki", "work", "work-items", "mcp-apps", "dashboard"]);
+      expect(availableDomains.length).toBe(11);
     });
   });
 
